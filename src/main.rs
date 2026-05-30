@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use chrono::Local;
-use line_controller::config::{DEFAULT_CONFIG_FILE, Settings};
-use line_controller::line_window::{LineController, LineError, LineOptions};
-use line_controller::models::{WorkItem, is_image_data};
-use line_controller::paths::{line_launcher_path, work_cache_path};
-use line_controller::work_api::WorkApi;
+use linebot_rust::config::{DEFAULT_CONFIG_FILE, Settings};
+use linebot_rust::line_window::{LineController, LineError, LineOptions};
+use linebot_rust::models::{WorkItem, is_image_data};
+use linebot_rust::paths::{line_launcher_path, work_cache_path};
+use linebot_rust::work_api::WorkApi;
 
 fn main() -> Result<()> {
     let args = Args::parse(env::args().skip(1).collect())?;
@@ -265,17 +265,17 @@ impl Args {
 
 fn print_usage() {
     println!(
-        r#"line_controller
+        r#"linebot_rust
 
 Usage:
-  line_controller.exe
-  line_controller.exe --once
-  line_controller.exe --inspect-line
-  line_controller.exe --test-room "聊天室" --test-message "測試訊息"
-  line_controller.exe --test-room "聊天室" --test-file "D:\path\file.png"
+  linebot_rust.exe
+  linebot_rust.exe --once
+  linebot_rust.exe --inspect-line
+  linebot_rust.exe --test-room "聊天室" --test-message "測試訊息"
+  linebot_rust.exe --test-room "聊天室" --test-file "D:\path\file.png"
 
 Options:
-  --config <path>   指定 setting.ini 路徑
+  --config <path>   指定 config.ini 路徑
   --no-close        測試時不送 Alt+F4 關閉聊天室視窗
 "#
     );
@@ -283,23 +283,41 @@ Options:
 
 struct LockFile {
     path: PathBuf,
+    file: Option<fs::File>,
 }
 
 impl LockFile {
     fn acquire(path: &Path) -> Result<Self> {
-        OpenOptions::new()
+        if path.exists() {
+            if let Err(e) = fs::remove_file(path) {
+                return Err(anyhow!(
+                    "已有程序執行中或無法建立 lock: {} (錯誤: {})",
+                    path.display(),
+                    e
+                ));
+            }
+        }
+
+        let file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(path)
-            .with_context(|| format!("已有程序執行中或無法建立 lock: {}", path.display()))?;
+            .with_context(|| format!("無法建立 lock 檔案: {}", path.display()))?;
+
+        use std::io::Write;
+        let mut file_clone = file.try_clone()?;
+        let _ = file_clone.write_all(b"GG");
+
         Ok(Self {
             path: path.to_path_buf(),
+            file: Some(file),
         })
     }
 }
 
 impl Drop for LockFile {
     fn drop(&mut self) {
+        self.file.take();
         let _ = fs::remove_file(&self.path);
     }
 }

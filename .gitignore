@@ -1,1 +1,5 @@
 /target
+config.ini
+setting.ini
+run.lock
+restart.txt

@@ -4,7 +4,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 
-pub const DEFAULT_CONFIG_FILE: &str = "setting.ini";
+pub const DEFAULT_CONFIG_FILE: &str = "config.ini";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {

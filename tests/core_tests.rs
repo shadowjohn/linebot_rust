@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use line_controller::config::Settings;
-use line_controller::models::{WorkItem, is_image_data};
-use line_controller::paths::{line_launcher_path, work_cache_path};
+use linebot_rust::config::Settings;
+use linebot_rust::models::{WorkItem, is_image_data};
+use linebot_rust::paths::{line_launcher_path, work_cache_path};
 
 #[test]
 fn parses_settings_ini_with_trimmed_values() {
@@ -54,7 +54,7 @@ fn detects_supported_image_headers() {
 #[test]
 fn builds_expected_windows_paths() {
     let home = PathBuf::from(r"C:\Users\stw_s");
-    let base = PathBuf::from(r"D:\mytools\line_controller");
+    let base = PathBuf::from(r"D:\mytools\linebot_rust");
 
     assert_eq!(
         line_launcher_path(&home),
@@ -62,6 +62,6 @@ fn builds_expected_windows_paths() {
     );
     assert_eq!(
         work_cache_path(&base, "20260529", "100", "png"),
-        PathBuf::from(r"D:\mytools\line_controller\cache\20260529\100.png")
+        PathBuf::from(r"D:\mytools\linebot_rust\cache\20260529\100.png")
     );
 }
