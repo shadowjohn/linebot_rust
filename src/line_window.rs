@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use clipboard_win::{Clipboard, Setter, formats};
 use uiautomation::controls::WindowControl;
 use uiautomation::core::{UIAutomation, UIElement};
+use uiautomation::inputs::Keyboard;
 use uiautomation::types::ControlType;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,49 +190,27 @@ impl LineController {
         // 1. 等待 1.5 秒讓搜尋結果清單在畫面上完全渲染出來
         sleep(Duration::from_millis(1500));
 
-        // 2. 直接尋找包含 room_name 房名的底層 Text 元素
-        // 在 Windows UI Automation 中，Qt 開發的 LINE 客戶端列表容器通常為空，但內部的文字標籤一定帶有該房名
-        let text_element = self.automation
-            .create_matcher()
-            .from_ref(&main_window)
-            .name(room_name)
-            .timeout(3000)
-            .find_first()
-            .map_err(|e| {
-                LineError::new(
-                    "401",
-                    format!("搜尋結果中找不到任何名稱為「{}」的文字控制項: {}", room_name, e),
-                )
-            })?;
+        // 2. DPI 免疫鍵盤導航 —— 使用全域 Keyboard 直接發送按鍵
+        //    Keyboard::new().send_keys() 不像 UIElement::send_keys() 會先呼叫 set_focus() 重置焦點，
+        //    因此能讓 {enter} → {tab} → {tab} → {down} → {enter} 的焦點自然流動不被打斷。
+        //    ┌─────────────────────────────────────────────────────┐
+        //    │  {enter}       → 確認搜尋（焦點從搜尋框到結果列表）  │
+        //    │  {tab}{tab}    → 焦點跳到「聊天室」分頁             │
+        //    │  {down}        → 選中第一個搜尋結果                 │
+        //    │  {enter}       → 開啟該聊天室視窗                   │
+        //    └─────────────────────────────────────────────────────┘
+        Keyboard::new()
+            .interval(350)
+            .send_keys("{enter}")
+            .map_err(|e| LineError::new("401", format!("鍵盤導航 Enter 失敗: {}", e)))?;
+        sleep(Duration::from_millis(800));
 
-        // 3. 往上尋找該文字控制項最近的 ListItem 容器 (通常為 clickable 的列表整列控制項)
-        let mut clickable = text_element.clone();
-        if let Ok(walker) = self.automation.get_control_view_walker() {
-            let mut current = text_element;
-            for _ in 0..8 {
-                let classname = current.get_classname().unwrap_or_default();
-                let control_type = current.get_control_type().unwrap_or(ControlType::Custom);
-                if control_type == ControlType::ListItem || classname == "ListItem" {
-                    clickable = current;
-                    break;
-                }
-                if let Ok(parent) = walker.get_parent(&current) {
-                    current = parent;
-                } else {
-                    break;
-                }
-            }
-        }
+        Keyboard::new()
+            .interval(350)
+            .send_keys("{tab}{tab}{down}{enter}")
+            .map_err(|e| LineError::new("401", format!("鍵盤導航 Tab/Down/Enter 失敗: {}", e)))?;
 
-        // 4. 聚焦該可點擊項目，並送出 Enter 鍵直接開啟！
-        clickable.set_focus()
-            .map_err(|e| LineError::new("401", format!("聚焦聊天室列表整列失敗: {}", e)))?;
-        sleep(Duration::from_millis(500));
-        
-        clickable.send_keys("{enter}", 30)
-            .map_err(|e| LineError::new("401", format!("點擊開啟聊天室失敗: {}", e)))?;
-
-        // 4. 等待 3 秒物理緩衝讓獨立聊天視窗完全彈出
+        // 3. 等待 3 秒物理緩衝讓獨立聊天視窗完全彈出
         sleep(Duration::from_secs(3));
         
         // 4. 確認視窗有彈出 (透過 find_active_chat_window 驗證，傳入 room_name 精準匹配)
@@ -295,19 +274,25 @@ impl LineController {
     }
 
     fn paste_text(&self, element: &UIElement, text: &str) -> Result<(), LineError> {
-        {
-            let _clip = Clipboard::new_attempts(10)
-                .map_err(|e| LineError::new("405", format!("開啟剪貼簿失敗: {}", e)))?;
-            formats::Unicode
-                .write_clipboard(&text.to_string())
-                .map_err(|e| LineError::new("405", format!("寫入文字到剪貼簿失敗: {}", e)))?;
-        } // 關鍵：在此處釋放 (Drop) 剪貼簿鎖！防止剪貼簿被佔用導致貼上舊資料
-
-        element
-            .send_keys("{ctrl}v", 30)
-            .map_err(|e| LineError::new("405", format!("貼上文字失敗: {}", e)))?;
-            
-        Ok(())
+        // 使用 uiautomation 內建的 send_text_by_clipboard
+        // 它底層會呼叫 Clipboard::open().set_text() 寫入 UTF-16 中文文字，
+        // 接著 Ctrl+V 貼上，最後自動還原剪貼簿內容。
+        //
+        // 注意：在某些 Windows 環境下，clipboard.restore() 可能會回報一個
+        // Windows 錯誤碼 0（「操作順利完成」），這其實代表操作成功，
+        // 但 uiautomation 會把它當作 Err 拋出。所以我們需要忽略此類假錯誤。
+        match element.send_text_by_clipboard(text) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let msg = format!("{}", e);
+                // 「操作順利完成」= Windows ERROR_SUCCESS (0)，是假錯誤
+                if msg.contains("操作順利完成") || msg.contains("completed successfully") {
+                    Ok(())
+                } else {
+                    Err(LineError::new("405", format!("貼上文字失敗: {}", e)))
+                }
+            }
+        }
     }
 
     #[allow(dead_code)]
