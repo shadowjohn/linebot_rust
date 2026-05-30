@@ -109,9 +109,7 @@ impl LineController {
         sleep(Duration::from_millis(150));
 
         // 貼上訊息
-        target
-            .send_text_by_clipboard(message)
-            .map_err(|e| LineError::new("405", format!("貼上訊息失敗: {}", e)))?;
+        self.paste_text(&target, message)?;
         
         // 再等1秒
         sleep(Duration::from_secs(1));
@@ -155,9 +153,10 @@ impl LineController {
         // 1. 等待 1.5 秒讓「傳送圖片確認彈窗」完全加載並自動取得焦點
         sleep(Duration::from_millis(1500));
 
-        // 2. 第一個 enter：動態發送給確認彈窗，將圖片確認放入對話框中
-        let focused = self.automation.get_focused_element().unwrap_or_else(|_| chat_win.clone());
-        focused.send_keys("{enter}", 30)
+        // 2. 第一個 enter：直接對 chat_win 送出 enter！
+        // 因為彈窗是 chat_win 的子視窗/模態彈窗，所以對 chat_win 送出 enter 會由系統自動路由給當前處於最上層的彈窗確認按鈕！
+        // 這完美避免了使用 get_focused_element() 時，若控制台在最上層會導致 enter 送錯給命令提示字元的問題！
+        chat_win.send_keys("{enter}", 30)
             .map_err(|e| LineError::new("405", format!("送出附件確認失敗: {}", e)))?;
             
         // 等待 1 秒讓確認彈窗關閉並把圖放進對話框
@@ -187,41 +186,57 @@ impl LineController {
             .map_err(|e| LineError::new("401", format!("找不到 LINE 搜尋框: {}", e)))?;
         self.set_edit_value(&search_edit, "")?;
         self.set_edit_value(&search_edit, room_name)?;
-        sleep(Duration::from_millis(900));
+        // 1. 等待 1.5 秒讓搜尋結果清單在畫面上完全渲染出來
+        sleep(Duration::from_millis(1500));
 
-        // 1. 輸入完後，先按 enter 等1秒
-        search_edit
-            .send_keys("{enter}", 30)
-            .map_err(|e| LineError::new("401", format!("搜尋後按 enter 失敗: {}", e)))?;
-        sleep(Duration::from_secs(1));
+        // 2. 直接尋找包含 room_name 房名的底層 Text 元素
+        // 在 Windows UI Automation 中，Qt 開發的 LINE 客戶端列表容器通常為空，但內部的文字標籤一定帶有該房名
+        let text_element = self.automation
+            .create_matcher()
+            .from_ref(&main_window)
+            .name(room_name)
+            .timeout(3000)
+            .find_first()
+            .map_err(|e| {
+                LineError::new(
+                    "401",
+                    format!("搜尋結果中找不到任何名稱為「{}」的文字控制項: {}", room_name, e),
+                )
+            })?;
 
-        // 2. 按 tab 等500ms (動態發送給當前焦點)
-        let focused = self.automation.get_focused_element().unwrap_or_else(|_| main_window.clone());
-        focused.send_keys("{tab}", 30)
-            .map_err(|e| LineError::new("401", format!("按第一個 tab 失敗: {}", e)))?;
+        // 3. 往上尋找該文字控制項最近的 ListItem 容器 (通常為 clickable 的列表整列控制項)
+        let mut clickable = text_element.clone();
+        if let Ok(walker) = self.automation.get_control_view_walker() {
+            let mut current = text_element;
+            for _ in 0..8 {
+                let classname = current.get_classname().unwrap_or_default();
+                let control_type = current.get_control_type().unwrap_or(ControlType::Custom);
+                if control_type == ControlType::ListItem || classname == "ListItem" {
+                    clickable = current;
+                    break;
+                }
+                if let Ok(parent) = walker.get_parent(&current) {
+                    current = parent;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        // 4. 聚焦該可點擊項目，並送出 Enter 鍵直接開啟！
+        clickable.set_focus()
+            .map_err(|e| LineError::new("401", format!("聚焦聊天室列表整列失敗: {}", e)))?;
         sleep(Duration::from_millis(500));
+        
+        clickable.send_keys("{enter}", 30)
+            .map_err(|e| LineError::new("401", format!("點擊開啟聊天室失敗: {}", e)))?;
 
-        // 3. 再按 tab 等500ms
-        let focused = self.automation.get_focused_element().unwrap_or_else(|_| main_window.clone());
-        focused.send_keys("{tab}", 30)
-            .map_err(|e| LineError::new("401", format!("按第二個 tab 失敗: {}", e)))?;
-        sleep(Duration::from_millis(500));
-
-        // 4. 按 down 等1秒
-        let focused = self.automation.get_focused_element().unwrap_or_else(|_| main_window.clone());
-        focused.send_keys("{down}", 30)
-            .map_err(|e| LineError::new("401", format!("按 down 失敗: {}", e)))?;
-        sleep(Duration::from_secs(1));
-
-        // 5. 再按 enter 等3秒 (開啟聊天室)
-        let focused = self.automation.get_focused_element().unwrap_or_else(|_| main_window.clone());
-        focused.send_keys("{enter}", 30)
-            .map_err(|e| LineError::new("401", format!("開啟聊天室按 enter 失敗: {}", e)))?;
+        // 4. 等待 3 秒物理緩衝讓獨立聊天視窗完全彈出
         sleep(Duration::from_secs(3));
         
-        // 4. 確認視窗有彈出 (透過 find_active_chat_window 驗證)
+        // 4. 確認視窗有彈出 (透過 find_active_chat_window 驗證，傳入 room_name 精準匹配)
         let chat_win = self
-            .find_active_chat_window()
+            .find_active_chat_window(room_name)
             .map_err(|e| LineError::new("401", format!("開啟聊天室後找不到聊天視窗: {}", e)))?;
 
         Ok((main_window, chat_win))
@@ -279,24 +294,62 @@ impl LineController {
         Ok(())
     }
 
+    fn paste_text(&self, element: &UIElement, text: &str) -> Result<(), LineError> {
+        {
+            let _clip = Clipboard::new_attempts(10)
+                .map_err(|e| LineError::new("405", format!("開啟剪貼簿失敗: {}", e)))?;
+            formats::Unicode
+                .write_clipboard(&text.to_string())
+                .map_err(|e| LineError::new("405", format!("寫入文字到剪貼簿失敗: {}", e)))?;
+        } // 關鍵：在此處釋放 (Drop) 剪貼簿鎖！防止剪貼簿被佔用導致貼上舊資料
+
+        element
+            .send_keys("{ctrl}v", 30)
+            .map_err(|e| LineError::new("405", format!("貼上文字失敗: {}", e)))?;
+            
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    fn item_contains_text(&self, item: &UIElement, text: &str) -> bool {
+        // 1. 先看 ListItem 本身有沒有包含 name
+        if item.get_name().unwrap_or_default().contains(text) {
+            return true;
+        }
+
+        // 2. 遞迴搜尋其下所有子元素，看有沒有任何子元素的 name 包含 text
+        if let Ok(found) = self.automation
+            .create_matcher()
+            .from_ref(item)
+            .find_all()
+        {
+            for child in found {
+                let name = child.get_name().unwrap_or_default();
+                if name.contains(text) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn find_search_edit(&self, window: &UIElement) -> Result<UIElement> {
         self.automation
             .create_matcher()
             .from_ref(window)
             .control_type(ControlType::Edit)
             .classname("LcTextField")
-            .depth(12)
             .timeout(5000)
             .find_first()
             .context("找不到 LcTextField")
     }
 
+    #[allow(dead_code)]
     fn find_result_items(&self, window: &UIElement, timeout_ms: u64) -> Result<Vec<UIElement>> {
         self.automation
             .create_matcher()
             .from_ref(window)
             .control_type(ControlType::ListItem)
-            .depth(12)
             .timeout(timeout_ms)
             .find_all()
             .context("找不到聊天室搜尋結果")
@@ -313,15 +366,28 @@ impl LineController {
         sleep(Duration::from_millis(100));
             
         if !value.is_empty() {
-            edit.send_text_by_clipboard(value)
-                .map_err(|e| LineError::new("405", format!("貼上搜尋文字失敗: {}", e)))?;
+            self.paste_text(edit, value)?;
             // 貼上後等待 300ms 讓 LINE 的搜尋清單結果有足夠時間渲染出來！
             sleep(Duration::from_millis(300));
         }
         Ok(())
     }
 
-    fn find_active_chat_window(&self) -> Result<UIElement> {
+    fn find_active_chat_window(&self, room_name: &str) -> Result<UIElement> {
+        // 第一優先級：精準尋找 classname 為 "ChatWindow" 且視窗名稱 (Title) 與目標 room_name 相同的視窗
+        // 這能確保即便開了多個 LINE 獨立聊天視窗，也能百分之百取得對的聊天室！
+        if let Ok(matched) = self.automation
+            .create_matcher()
+            .control_type(ControlType::Window)
+            .classname("ChatWindow")
+            .name(room_name)
+            .timeout(1000)
+            .find_first()
+        {
+            return Ok(matched);
+        }
+
+        // 第二優先級：如果目前的焦點就在該 ChatWindow 的某個子控制項上，從焦點往上追溯
         if let Ok(focused) = self.automation.get_focused_element() {
             if let Ok(walker) = self.automation.get_control_view_walker() {
                 let mut current = focused;
@@ -339,6 +405,7 @@ impl LineController {
             }
         }
         
+        // 最終備用：獲取任意一個 ChatWindow
         self.automation
             .create_matcher()
             .control_type(ControlType::Window)
