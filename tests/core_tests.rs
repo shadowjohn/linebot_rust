@@ -9,7 +9,7 @@ fn parses_settings_ini_with_trimmed_values() {
     let text = r#"
 # 環境設定區
 [Settings]
-SERVICE_URL = https://map.gis.tw/SystemReport/linebotgis_api.aspx
+SERVICE_URL = https://your-gis-server-domain/api
 BOT_TOKEN =  abc123
 USER_AGENT =  GIS Test Agent
 POLL_SECONDS = 7
@@ -19,7 +19,7 @@ POLL_SECONDS = 7
 
     assert_eq!(
         settings.service_url,
-        "https://map.gis.tw/SystemReport/linebotgis_api.aspx"
+        "https://your-gis-server-domain/api"
     );
     assert_eq!(settings.bot_token, "abc123");
     assert_eq!(settings.user_agent, "GIS Test Agent");

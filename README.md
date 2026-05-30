@@ -38,7 +38,7 @@
 # 環境設定區
 [Settings]
 # 服務派工網址
-SERVICE_URL = https://map.gis.tw/SystemReport/linebotgis_api.aspx
+SERVICE_URL = https://your-gis-server-domain/api
 # 機器人 Token
 BOT_TOKEN = 請輸入您的BOT_TOKEN
 # 輪詢秒數 (預設 5 秒偵測一次新工作)
@@ -114,6 +114,13 @@ cargo test
 
 ---
 
+## ✍️ 作者
+
+- **羽山秋人** ([https://3wa.tw](https://3wa.tw))
+
+---
+
 ## 📜 授權條款
 
 本專案採用 MIT 授權條款開放原始碼。
+

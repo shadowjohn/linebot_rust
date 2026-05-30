@@ -83,7 +83,7 @@ pub fn default_ini() -> String {
         r#"# 環境設定區
 [Settings]
 # 服務網址
-SERVICE_URL = https://map.gis.tw/SystemReport/linebotgis_api.aspx
+SERVICE_URL = https://your-gis-server-domain/api
 # 機器人 TOKEN
 BOT_TOKEN = 請輸入BOT_TOKEN
 # 機器人 USER_AGENT
