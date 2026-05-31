@@ -7,12 +7,45 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use chrono::Local;
 use linebot_rust::config::{DEFAULT_CONFIG_FILE, Settings};
+use linebot_rust::file_logger::append_error;
 use linebot_rust::line_window::{LineController, LineError, LineOptions};
 use linebot_rust::models::{WorkItem, is_image_data};
 use linebot_rust::paths::{line_launcher_path, work_cache_path};
 use linebot_rust::work_api::WorkApi;
 
+const APP_VERSION: &str = "V0.01";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkSendMode {
+    None,
+    MessageOnly,
+    FileOnly,
+    MessageAndFile,
+}
+
+fn work_send_mode(has_message: bool, has_file: bool) -> WorkSendMode {
+    match (has_message, has_file) {
+        (true, true) => WorkSendMode::MessageAndFile,
+        (true, false) => WorkSendMode::MessageOnly,
+        (false, true) => WorkSendMode::FileOnly,
+        (false, false) => WorkSendMode::None,
+    }
+}
+
 fn main() -> Result<()> {
+    if let Err(err) = run() {
+        if let Ok(base_dir) = env::current_dir() {
+            let _ = append_error(&base_dir, &format!("fatal error: {err:#}"));
+        }
+        return Err(err);
+    }
+
+    Ok(())
+}
+
+fn run() -> Result<()> {
+    println!("linebot_rust {}", APP_VERSION);
+
     let args = Args::parse(env::args().skip(1).collect())?;
     let base_dir = env::current_dir().context("取得目前工作目錄失敗")?;
     let settings = Settings::load_or_create(&args.config_path)?;
@@ -48,6 +81,7 @@ fn main() -> Result<()> {
 
         if let Err(err) = run_once(&api, &line, &base_dir) {
             eprintln!("run_once error: {err:#}");
+            let _ = append_error(&base_dir, &format!("run_once error: {err:#}"));
         }
 
         if args.once {
@@ -66,6 +100,14 @@ fn run_test_mode(
     message: Option<&str>,
     file: Option<&Path>,
 ) -> Result<()> {
+    if let (Some(message), Some(file)) = (message, file) {
+        line.send_message_with_file(room, message, file)
+            .map_err(anyhow::Error::new)
+            .context("測試文字與附件合併傳送失敗")?;
+        println!("test message with file sent.");
+        return Ok(());
+    }
+
     if let Some(message) = message {
         line.send_message(room, message)
             .map_err(anyhow::Error::new)
@@ -102,6 +144,10 @@ fn run_once(api: &WorkApi, line: &LineController, base_dir: &Path) -> Result<()>
 
         if let Err(err) = api.update_work_status(&item.id, is_ok, error_code) {
             eprintln!("updateWorkStatus failed id={}: {err:#}", item.id);
+            let _ = append_error(
+                base_dir,
+                &format!("updateWorkStatus failed id={}: {err:#}", item.id),
+            );
         }
     }
 
@@ -117,33 +163,64 @@ fn process_item(
     let mut is_success = true;
     let mut error_code = "200";
 
-    if item.has_message() {
-        println!("Do send_message...");
-        if let Err(err) = line.send_message(&item.room_name, &item.message) {
-            eprintln!("send_message failed: {}", err);
-            is_success = false;
-            error_code = err.error_code;
+    match work_send_mode(item.has_message(), item.has_file()) {
+        WorkSendMode::MessageAndFile => {
+            println!("Do send_message_with_file...");
+            match download_file_to_cache(api, base_dir, item)
+                .and_then(|path| line.send_message_with_file(&item.room_name, &item.message, &path))
+            {
+                Ok(()) => {}
+                Err(err) => {
+                    eprintln!("send_message_with_file failed: {}", err);
+                    let _ = append_error(
+                        base_dir,
+                        &format!(
+                            "send_message_with_file failed id={}, room={}: {}",
+                            item.id, item.room_name, err
+                        ),
+                    );
+                    is_success = false;
+                    error_code = err.error_code;
+                }
+            }
         }
-    }
-
-    if item.has_file() {
-        println!("Do send_file...");
-        if let Err(err) = download_and_send_file(api, line, base_dir, item) {
-            eprintln!("send_file failed: {}", err);
-            is_success = false;
-            error_code = err.error_code;
+        WorkSendMode::MessageOnly => {
+            println!("Do send_message...");
+            if let Err(err) = line.send_message(&item.room_name, &item.message) {
+                eprintln!("send_message failed: {}", err);
+                let _ = append_error(
+                    base_dir,
+                    &format!(
+                        "send_message failed id={}, room={}: {}",
+                        item.id, item.room_name, err
+                    ),
+                );
+                is_success = false;
+                error_code = err.error_code;
+            }
         }
+        WorkSendMode::FileOnly => {
+            println!("Do send_file...");
+            if let Err(err) = download_and_send_file(api, line, base_dir, item) {
+                eprintln!("send_file failed: {}", err);
+                let _ = append_error(
+                    base_dir,
+                    &format!(
+                        "send_file failed id={}, room={}: {}",
+                        item.id, item.room_name, err
+                    ),
+                );
+                is_success = false;
+                error_code = err.error_code;
+            }
+        }
+        WorkSendMode::None => {}
     }
 
     (is_success, error_code)
 }
 
-fn download_and_send_file(
-    api: &WorkApi,
-    line: &LineController,
-    base_dir: &Path,
-    item: &WorkItem,
-) -> Result<(), LineError> {
+fn download_file_to_cache(api: &WorkApi, base_dir: &Path, item: &WorkItem) -> Result<PathBuf, LineError> {
     let data = api
         .download_file(&item.file_uuid)
         .map_err(|e| LineError::new("402", format!("附件下載失敗: {e:#}")))?;
@@ -176,6 +253,17 @@ fn download_and_send_file(
             .map_err(|e| LineError::new("402", format!("建立 cache 目錄失敗: {e}")))?;
     }
     fs::write(&path, data).map_err(|e| LineError::new("402", format!("寫入附件失敗: {e}")))?;
+
+    Ok(path)
+}
+
+fn download_and_send_file(
+    api: &WorkApi,
+    line: &LineController,
+    base_dir: &Path,
+    item: &WorkItem,
+) -> Result<(), LineError> {
+    let path = download_file_to_cache(api, base_dir, item)?;
 
     line.send_file(&item.room_name, &path)
 }
@@ -319,5 +407,18 @@ impl Drop for LockFile {
     fn drop(&mut self) {
         self.file.take();
         let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn work_with_message_and_file_uses_combined_send() {
+        assert_eq!(work_send_mode(true, true), WorkSendMode::MessageAndFile);
+        assert_eq!(work_send_mode(true, false), WorkSendMode::MessageOnly);
+        assert_eq!(work_send_mode(false, true), WorkSendMode::FileOnly);
+        assert_eq!(work_send_mode(false, false), WorkSendMode::None);
     }
 }
