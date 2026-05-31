@@ -63,6 +63,83 @@ USER_AGENT = Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML
 
 ---
 
+## 🔌 介接服務 JSON 範本
+
+Bot 會向設定檔中的 `SERVICE_URL` 取得派工資料。介接服務回傳 JSON 格式如下：
+
+```json
+{
+  "status": "OK",
+  "data": [
+    {
+      "id": "246226",
+      "room_name": "18歲屁孩禁區",
+      "message": "這是一則要發送的文字",
+      "file_uuid": "b7c4f2d4-0000-0000-0000-123456789abc",
+      "file_subname": "png"
+    }
+  ]
+}
+```
+
+主要欄位：
+
+* `id`：派工 ID。
+* `room_name`：LINE 聊天室 / 群組名稱。
+* `message`：要發送的文字，可為空字串。
+* `file_uuid`：附件識別碼；有值時 Bot 會下載附件，可為空字串。
+* `file_subname`：附件副檔名，例如 `png`、`jpg`、`gif`、`pdf`。
+
+常見派工範例：
+
+```json
+{
+  "id": "1001",
+  "room_name": "測試聊天室",
+  "message": "只送文字",
+  "file_uuid": "",
+  "file_subname": ""
+}
+```
+
+```json
+{
+  "id": "1002",
+  "room_name": "測試聊天室",
+  "message": "",
+  "file_uuid": "file-uuid-1002",
+  "file_subname": "png"
+}
+```
+
+```json
+{
+  "id": "1003",
+  "room_name": "測試聊天室",
+  "message": "文字與圖片合併發送",
+  "file_uuid": "file-uuid-1003",
+  "file_subname": "png"
+}
+```
+
+附件下載由介接服務依 `file_uuid` 提供二進位檔案內容。若 `file_subname` 是 `jpg`、`jpeg`、`png`、`gif`，Bot 會檢查檔案 header 是否符合圖片格式。
+
+派工完成後，Bot 會回報：
+
+* `id`：派工 ID
+* `is_ok`：`1` 表示成功，`0` 表示失敗
+* `error_code`：Bot 端錯誤碼；成功時為 `200`
+
+常見錯誤碼：
+
+* `200`：成功。
+* `401`：開啟聊天室或搜尋聊天室失敗。
+* `402`：附件下載、快取或檔案格式檢查失敗。
+* `404`：LINE 啟動或主視窗不存在。
+* `405`：聚焦、貼上、送出或剪貼簿操作失敗。
+
+---
+
 ## 📦 編譯與安裝
 
 在專案根目錄下使用 Cargo 進行發布版本編譯：
