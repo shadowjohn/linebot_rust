@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clipboard_win::{Clipboard, Setter, formats, get_clipboard, set_clipboard};
-use uiautomation::controls::WindowControl;
+use uiautomation::actions::Value;
+use uiautomation::controls::{EditControl, WindowControl};
 use uiautomation::core::{UIAutomation, UIElement};
 use uiautomation::inputs::Keyboard;
 use uiautomation::types::ControlType;
@@ -128,6 +129,10 @@ fn push_element_signature(output: &mut String, element: &UIElement) {
 
 fn trace_step(start: Instant, message: &str) {
     println!("[line +{:>5}ms] {}", start.elapsed().as_millis(), message);
+}
+
+fn should_restore_message_after_file_confirm(input_value: Option<&str>, message: &str) -> bool {
+    !input_value.unwrap_or_default().contains(message)
 }
 
 #[cfg(test)]
@@ -293,10 +298,7 @@ impl LineController {
         sleep(Duration::from_millis(150));
         trace_step(trace_start, "chat input focused");
 
-        self.paste_text(&target, message)?;
-        trace_step(trace_start, "message pasted");
-        sleep(Duration::from_millis(300));
-
+        // 先貼附件再貼文字，避免附件確認 Enter 被 LINE 當成送出文字，造成同內容重複發送。
         self.paste_file(&target, file_path)?;
         trace_step(trace_start, "file pasted");
 
@@ -312,10 +314,14 @@ impl LineController {
             .set_focus()
             .map_err(|e| LineError::new("405", format!("重新聚焦輸入框失敗: {}", e)))?;
 
-        // LINE 貼圖確認後可能會清掉原本輸入框文字，這裡補貼一次文字到待送訊息區。
-        self.paste_text(&target, message)?;
-        trace_step(trace_start, "message restored after file confirm");
-        sleep(Duration::from_millis(300));
+        let input_value = self.input_text_value(&target).ok();
+        if should_restore_message_after_file_confirm(input_value.as_deref(), message) {
+            self.paste_text(&target, message)?;
+            trace_step(trace_start, "message pasted after file confirm");
+            sleep(Duration::from_millis(300));
+        } else {
+            trace_step(trace_start, "message already in input after file confirm");
+        }
 
         self.send_enter_to_input(&target)
             .map_err(|e| LineError::new("405", format!("送出文字與附件失敗: {}", e)))?;
@@ -492,6 +498,11 @@ impl LineController {
         sleep(Duration::from_millis(100));
         Keyboard::new().send_keys("{enter}")?;
         Ok(())
+    }
+
+    fn input_text_value(&self, element: &UIElement) -> Result<String> {
+        let edit = EditControl::try_from(element)?;
+        Ok(edit.get_value()?)
     }
 
     #[allow(dead_code)]
@@ -871,5 +882,10 @@ mod tests {
             poll_attempts(Duration::from_millis(5001), Duration::from_millis(100)),
             51
         );
+    }
+
+    #[test]
+    fn message_restore_skips_when_input_already_has_message() {
+        assert!(!should_restore_message_after_file_confirm(Some("測試文字"), "測試文字"));
     }
 }
